@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="필기본">
 <title>필기본 뷰어</title>
 <style>
 :root{
@@ -45,6 +48,7 @@ input{flex:1;min-width:0;border:1px solid var(--rule);border-radius:6px;backgrou
 input:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 button{border:1px solid var(--accent);background:var(--accent);color:var(--surface);border-radius:6px;padding:6px 14px;font:inherit;font-size:13.5px;font-weight:600;cursor:pointer}
 button:disabled{opacity:.6;cursor:default}
+button.ghost{background:var(--surface);color:var(--accent)}
 .docs{list-style:none;margin:0;padding:0}
 .docs a{display:block;padding:8px 10px;border:1px solid var(--rule);border-radius:6px;margin-bottom:6px;text-decoration:none}
 @media (prefers-reduced-motion: reduce){.spin{animation:none}}
@@ -55,10 +59,12 @@ button:disabled{opacity:.6;cursor:default}
   <h1 id="title">필기본 뷰어</h1>
   <p class="status" id="statusRow"><span class="spin" aria-hidden="true"></span><span id="status" role="status">불러오는 중…</span></p>
   <p class="err" id="err" hidden></p>
+  <p id="errActions" hidden><button type="button" class="ghost" id="retoken">다른 토큰 넣기</button></p>
   <section id="login" hidden>
     <p>비공개 저장소 <b class="repo"></b>에 있는 필기본을 여는 페이지입니다. 이 기기에서 처음 열 때 한 번만 GitHub 토큰을 넣으면, 필기본과 편집 내용이 모두 불러와지고 편집하면 GitHub에 자동 저장됩니다.</p>
     <ol>
       <li><a id="tokenLink" href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub 토큰 만들기</a>(Fine-grained token)</li>
+      <li><b>Expiration</b>은 넉넉하게(예: 1년) — 만료되면 새 토큰을 다시 넣어야 함</li>
       <li><b>Repository access</b> → Only select repositories → <b class="repo"></b></li>
       <li><b>Permissions</b> → Repository permissions → <b>Contents: Read and write</b></li>
       <li>만들어진 토큰(<code>github_pat_…</code>)을 아래에 붙여 넣기</li>
@@ -90,8 +96,9 @@ button:disabled{opacity:.6;cursor:default}
   function getToken(){ try { return localStorage.getItem(TOKEN_KEY) || ''; } catch(e){ return ''; } }
   function setToken(t){ try { localStorage.setItem(TOKEN_KEY, t); return true; } catch(e){ return false; } }
   function status(msg, spinning){ $('#status').textContent = msg; $('#statusRow').hidden = !msg; $('.spin').hidden = !spinning; }
-  function error(msg){ var e = $('#err'); e.textContent = msg || ''; e.hidden = !msg; }
+  function error(msg, retoken){ var e = $('#err'); e.textContent = msg || ''; e.hidden = !msg; $('#errActions').hidden = !(msg && retoken); }
   function seg(p){ return p.split('/').map(encodeURIComponent).join('/'); }
+  function isRate(r){ return r.status === 429 || (r.status === 403 && r.headers.get('x-ratelimit-remaining') === '0'); }
   function gh(path, token, accept){
     return fetch(API + path, { headers: { 'Accept': accept || 'application/vnd.github+json', 'Authorization': 'Bearer ' + token }, cache: 'no-store' });
   }
@@ -101,6 +108,7 @@ button:disabled{opacity:.6;cursor:default}
   /* 받은 필기본은 이 기기에 보관(다음부터 바뀐 경우에만 다시 받음, 인터넷이 없어도 열림) */
   function idb(){
     return new Promise(function(res, rej){
+      setTimeout(function(){ rej(new Error('indexedDB timeout')); }, 2000);
       var q = indexedDB.open('notes-viewer', 1);
       q.onupgradeneeded = function(){ q.result.createObjectStore('docs'); };
       q.onsuccess = function(){ res(q.result); };
@@ -129,18 +137,13 @@ button:disabled{opacity:.6;cursor:default}
   }
 
   function render(html){
-    var hash = location.hash;
     document.open();
-    document.write(html);
+    document.write(html);   // 읽던 위치·#주소 이동은 필기본이 스스로 처리
     document.close();
-    if (hash) setTimeout(function(){
-      var el = document.getElementById(decodeURIComponent(hash.slice(1)));
-      if (el) el.scrollIntoView();
-    }, 400);
   }
 
   function showLogin(msg){
-    status('', false); error(msg);
+    status('', false); error(msg, false);
     Array.prototype.forEach.call(document.querySelectorAll('.repo'), function(e){ e.textContent = doc.repo; });
     $('#login').hidden = false;
     $('#token').focus();
@@ -154,14 +157,19 @@ button:disabled{opacity:.6;cursor:default}
     var cached = await idbGet(docId), meta;
     try {
       var r = await gh(contentsPath(doc), token, 'application/vnd.github.object+json');
-      if (r.status === 401) return showLogin('저장된 토큰이 만료되었거나 올바르지 않습니다. 새 토큰을 넣어 주세요.');
-      if (r.status === 404) return showLogin('이 토큰으로는 ' + doc.repo + ' 저장소의 필기본을 볼 수 없습니다. 토큰의 Repository access를 확인하세요.');
-      if (!r.ok) throw new Error('GitHub 응답 ' + r.status);
+      if (!r.ok){
+        // 토큰 만료·권한 문제여도 받아 둔 사본이 있으면 연다(필기본의 GitHub 동기화 창에서 새 토큰으로 다시 연결 가능)
+        if (cached) return render(cached.html);
+        if (r.status === 401) return showLogin('저장된 토큰이 만료되었거나 올바르지 않습니다. 새 토큰을 넣어 주세요.');
+        if (r.status === 404) return showLogin('이 토큰으로는 ' + doc.repo + ' 저장소의 필기본을 볼 수 없습니다. 토큰의 Repository access를 확인하세요.');
+        if (r.status === 403 && !isRate(r)) return showLogin('토큰에 Contents 권한이 없습니다. Permissions에서 Contents: Read and write를 고른 토큰을 넣어 주세요.');
+        throw new Error('GitHub 응답 ' + r.status + (isRate(r) ? ' — 요청 한도, 잠시 뒤 다시 시도' : ''));
+      }
       meta = await r.json();
     } catch(e){
       if (cached) return render(cached.html);
       status('', false);
-      return error('필기본을 불러오지 못했습니다. 인터넷 연결을 확인한 뒤 새로 고침하세요. (' + e.message + ')');
+      return error('필기본을 불러오지 못했습니다. 인터넷 연결을 확인한 뒤 새로 고침하세요. (' + e.message + ')', true);
     }
     if (cached && cached.sha === meta.sha) return render(cached.html);
     status('필기본 내려받는 중… (' + Math.round((meta.size || 0) / 1024) + 'KB)', true);
@@ -169,7 +177,8 @@ button:disabled{opacity:.6;cursor:default}
       var html;
       if (meta.content && meta.encoding === 'base64') html = b64dec(meta.content);
       else {
-        var raw = await gh(contentsPath(doc), token, 'application/vnd.github.raw+json');
+        // sha로 정확히 그 버전을 받음(방금 올라간 빌드와 어긋나지 않게)
+        var raw = await gh('/repos/' + doc.repo + '/git/blobs/' + meta.sha, token, 'application/vnd.github.raw+json');
         if (!raw.ok) throw new Error('GitHub 응답 ' + raw.status);
         html = await raw.text();
       }
@@ -178,9 +187,11 @@ button:disabled{opacity:.6;cursor:default}
     } catch(e){
       if (cached) return render(cached.html);
       status('', false);
-      error('필기본을 내려받지 못했습니다. (' + e.message + ')');
+      error('필기본을 내려받지 못했습니다. (' + e.message + ')', true);
     }
   }
+
+  $('#retoken').addEventListener('click', function(){ try { localStorage.removeItem(TOKEN_KEY); } catch(e){} showLogin(''); });
 
   $('#form').addEventListener('submit', async function(e){
     e.preventDefault();
@@ -188,9 +199,10 @@ button:disabled{opacity:.6;cursor:default}
     if (!t) return;
     btn.disabled = true; error('');
     try {
-      var r = await gh('/repos/' + doc.repo, t);
+      var r = await gh(contentsPath(doc), t, 'application/vnd.github.object+json');
       if (r.status === 401) return error('토큰이 올바르지 않습니다. 다시 확인해 주세요.');
       if (r.status === 404) return error('이 토큰으로는 ' + doc.repo + ' 저장소를 볼 수 없습니다. Repository access에 저장소를 추가했는지 확인하세요.');
+      if (r.status === 403 && !isRate(r)) return error('토큰에 Contents 권한이 없습니다. Permissions → Repository permissions → Contents를 Read and write로 고른 토큰을 만들어 주세요.');
       if (!r.ok) return error('GitHub 응답 ' + r.status + ' — 잠시 뒤 다시 시도하세요.');
       if (!setToken(t)) return error('이 브라우저에서는 토큰을 저장할 수 없습니다(개인 정보 보호 모드인지 확인하세요).');
       $('#token').value = '';

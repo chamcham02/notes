@@ -1,6 +1,6 @@
 # 필기본 뷰어
 
-https://chamcham02.github.io/notes/
+https://chamcham02.github.io/notes_hangjeong/
 
 이 저장소에는 **필기 내용이 없습니다.** 비공개 저장소에 있는 필기본 HTML을 GitHub 토큰으로 불러와 여는 작은 페이지(`index.html`)만 있습니다.
 
